@@ -95,6 +95,19 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: pgx.St
     return recurrent_fn_output, state
 
 
+def make_policy(gumbel_scale: float = 1.0):
+    return partial(
+        mctx.gumbel_muzero_policy,
+        recurrent_fn=recurrent_fn,
+        num_simulations=config.num_simulations,
+        qtransform=partial(
+            mctx.qtransform_completed_by_mix_value,
+            rescale_values=False,
+        ),
+        gumbel_scale=gumbel_scale,
+    )
+
+
 class Sample(NamedTuple):
     obs: jnp.ndarray
     policy_tgt: jnp.ndarray
@@ -108,6 +121,8 @@ def selfplay(
     rng_key: jnp.ndarray,
 ) -> Sample:
     model_params, model_state = model
+
+    train_policy = make_policy(gumbel_scale=1.0)
 
     class StepFnOutput(NamedTuple):
         obs: jnp.ndarray
@@ -124,18 +139,11 @@ def selfplay(
         )
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
-        policy_output = mctx.gumbel_muzero_policy(
+        policy_output = train_policy(
             params=model,
             rng_key=key,
             root=root,
-            recurrent_fn=recurrent_fn,
-            num_simulations=config.num_simulations,
             invalid_actions=~state.legal_action_mask,
-            qtransform=partial(
-                mctx.qtransform_completed_by_mix_value,
-                rescale_values=False,
-            ),
-            gumbel_scale=1.0,
         )
         actor = state.current_player
         state = jax.vmap(auto_reset(env.step, env.init))(state, policy_output.action)
