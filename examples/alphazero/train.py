@@ -17,6 +17,8 @@ from pgx.experimental import auto_reset
 from pydantic import BaseModel
 
 from network import AZNet
+from pgx._src.baseline import _load_baseline_model, _create_az_model_v0
+
 
 devices = jax.local_devices()
 num_devices = len(devices)
@@ -67,16 +69,25 @@ forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 optimizer = optax.adam(learning_rate=config.learning_rate)
 
 
-def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: pgx.State):
+def make_model_fn(model):
+    model_params, model_state = model
+
+    def model_fn(obs):
+        (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
+        return logits, value
+    
+    return model_fn
+
+
+def recurrent_fn(model_fn, rng_key: jnp.ndarray, action: jnp.ndarray, state: pgx.State):
     # model: params
     # state: embedding
     del rng_key
-    model_params, model_state = model
 
     current_player = state.current_player
     state = jax.vmap(env.step)(state, action)
 
-    (logits, value), _ = forward.apply(model_params, model_state, state.observation, is_eval=True)
+    logits, value = model_fn(state.observation)
     # mask invalid actions
     logits = logits - jnp.max(logits, axis=-1, keepdims=True)
     logits = jnp.where(state.legal_action_mask, logits, jnp.finfo(logits.dtype).min)
@@ -139,8 +150,9 @@ def selfplay(
         )
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
+        model_fn = make_model_fn(model)
         policy_output = train_policy(
-            params=model,
+            params=model_fn,
             rng_key=key,
             root=root,
             invalid_actions=~state.legal_action_mask,
@@ -223,7 +235,7 @@ def train(model, opt_state, data: Sample):
 
 @jax.pmap
 def evaluate(rng_key, my_model):
-    """A simplified evaluation by sampling. Only for debugging. 
+    """A simplified evaluation only against baseline models. Only for debugging. 
     Please use MCTS and run tournaments for serious evaluation."""
     my_player = 0
     my_model_parmas, my_model_state = my_model
@@ -233,18 +245,47 @@ def evaluate(rng_key, my_model):
     keys = jax.random.split(subkey, batch_size)
     state = jax.vmap(env.init)(keys)
 
+    eval_policy = make_policy(gumbel_scale=0.0)
+
     def body_fn(val):
         key, state, R = val
-        (my_logits, _), _ = forward.apply(
+
+        # infer by NNs 
+        (my_logits, my_value), _ = forward.apply(
             my_model_parmas, my_model_state, state.observation, is_eval=True
         )
-        opp_logits, _ = baseline(state.observation)
-        is_my_turn = (state.current_player == my_player).reshape((-1, 1))
-        logits = jnp.where(is_my_turn, my_logits, opp_logits)
+        opp_logits, opp_value = baseline(state.observation)
+
+        
+        # run my MCTS 
         key, subkey = jax.random.split(key)
-        action = jax.random.categorical(subkey, logits, axis=-1)
+        my_root = mctx.RootFnOutput(prior_logits=my_logits, value=my_value, embedding=state)
+        model_fn = make_model_fn(my_model)
+        my_policy_output = eval_policy(
+            params=model_fn,
+            rng_key=subkey,
+            root=my_root,
+            invalid_actions=~state.legal_action_mask,
+        )
+
+        # run baseline MCTS 
+        key, subkey = jax.random.split(key)
+        opp_root = mctx.RootFnOutput(prior_logits=opp_logits, value=opp_value, embedding=state)
+        opp_policy_output = eval_policy(
+            params=baseline,
+            rng_key=subkey,
+            root=opp_root,
+            invalid_actions=~state.legal_action_mask,
+        )
+
+        # actual step in real environment
+        my_action = my_policy_output.action_weights.argmax(axis=-1)
+        opp_action = opp_policy_output.action_weights.argmax(axis=-1)
+        is_my_turn = (state.current_player == my_player)
+        action = jnp.where(is_my_turn, my_action, opp_action)
         state = jax.vmap(env.step)(state, action)
         R = R + state.rewards[jnp.arange(batch_size), my_player]
+
         return (key, state, R)
 
     _, _, R = jax.lax.while_loop(
