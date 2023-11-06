@@ -24,20 +24,20 @@ TRUE = jnp.bool_(True)
 
 @dataclass
 class State(v1.State):
-    current_player: jnp.ndarray = jnp.int32(0)
-    observation: jnp.ndarray = jnp.zeros((3, 3, 2), dtype=jnp.bool_)
-    rewards: jnp.ndarray = jnp.float32([0.0, 0.0])
-    terminated: jnp.ndarray = FALSE
-    truncated: jnp.ndarray = FALSE
-    legal_action_mask: jnp.ndarray = jnp.ones(9, dtype=jnp.bool_)
-    _rng_key: jax.random.KeyArray = jax.random.PRNGKey(0)
-    _step_count: jnp.ndarray = jnp.int32(0)
+    current_player: jnp.ndarray
+    observation: jnp.ndarray
+    rewards: jnp.ndarray
+    terminated: jnp.ndarray
+    truncated: jnp.ndarray
+    legal_action_mask: jnp.ndarray
+    _rng_key: jax.random.KeyArray
+    _step_count: jnp.ndarray
     # --- Tic-tac-toe specific ---
-    _turn: jnp.ndarray = jnp.int32(0)
+    _turn: jnp.ndarray
     # 0 1 2
     # 3 4 5
     # 6 7 8
-    _board: jnp.ndarray = -jnp.ones(9, jnp.int32)  # -1 (empty), 0, 1
+    _board: jnp.ndarray
 
     @property
     def env_id(self) -> v1.EnvId:
@@ -75,7 +75,19 @@ class TicTacToe(v1.Env):
 def _init(rng: jax.random.KeyArray) -> State:
     rng, subkey = jax.random.split(rng)
     current_player = jnp.int32(jax.random.bernoulli(subkey))
-    return State(current_player=current_player)  # type:ignore
+    return State(  # type:ignore
+        current_player=current_player,
+        observation=jnp.zeros((3, 3, 2), dtype=jnp.bool_),
+        rewards=jnp.float32([0.0, 0.0]),
+        terminated=FALSE,
+        truncated=FALSE,
+        legal_action_mask=jnp.ones(9, dtype=jnp.bool_),
+        _rng_key=jax.random.PRNGKey(0),
+        _step_count=jnp.int32(0),
+        # --- Tic-tac-toe specific ---
+        _turn=jnp.int32(0),
+        _board=-jnp.ones(9, jnp.int32)  # -1 (empty), 0, 1
+    )
 
 
 def _step(state: State, action: jnp.ndarray) -> State:
